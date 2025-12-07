@@ -1,0 +1,302 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#include <BLEDevice.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+#include <qrcode.h>  // <<< NOVO: biblioteca de QR Code
+
+// ====================== DISPLAY ======================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
+
+// ====================== BOTAO ========================
+#define BOTAO 4
+const unsigned long LONG_PRESS_MS   = 2000;  // 2 segundos (limpar)
+const unsigned long DOUBLE_CLICK_MS = 400;   // intervalo máx. para duplo clique (ms)
+
+bool botaoAnterior = HIGH;
+unsigned long instantePressionado = 0;
+
+// Controle de clique simples/duplo
+bool aguardandoSegundoClique = false;
+bool clickSimplesPendente    = false;
+unsigned long instanteUltimoClique = 0;
+
+// ====================== BEACONS ======================
+// MACs dos beacons (exatamente como o app mostra)
+const char* MAC_TEAR_92 = "E0:93:8A:13:88:DA";
+const char* MAC_TEAR_23 = "ED:7D:42:03:7F:D7";
+
+BLEScan* pBLEScan;
+
+// Info do ultimo scan
+bool beaconVisivel    = false;
+int  tearMaisProximo  = 0;   // 0 = nenhum, 92 ou 23
+int  rssiMaisProximo  = 0;
+
+// Valores "capturados" no clique
+bool capturado     = false;
+int  tearCapturado = 0;
+int  rssiCapturado = 0;
+
+// ====================== QR CODE ======================
+QRCode qrcode;
+uint8_t qrcodeData[200];  // buffer para o QR (sobra espaço)
+
+// Modo de visualização
+bool modoQRCode = false;   // true = mostrar QR code na tela
+
+// ====================== FUNCOES ======================
+
+void scanBeacon() {
+  beaconVisivel = false;
+  tearMaisProximo = 0;
+
+  int rssi92 = -999;
+  int rssi23 = -999;
+  bool achou92 = false;
+  bool achou23 = false;
+
+  BLEScanResults results = *pBLEScan->start(1, false); // scan de 1s
+  int count = results.getCount();
+
+  for (int i = 0; i < count; i++) {
+    BLEAdvertisedDevice d = results.getDevice(i);
+    String mac = d.getAddress().toString();  // ex: "ed:7d:42:03:7f:d7"
+
+    if (mac.equalsIgnoreCase(MAC_TEAR_92)) {
+      achou92 = true;
+      rssi92 = d.getRSSI();
+    }
+
+    if (mac.equalsIgnoreCase(MAC_TEAR_23)) {
+      achou23 = true;
+      rssi23 = d.getRSSI();
+    }
+  }
+
+  pBLEScan->clearResults();
+
+  // Decide qual eh o mais proximo (RSSI maior = mais perto)
+  if (achou92 || achou23) {
+    beaconVisivel = true;
+
+    if (achou92 && (!achou23 || rssi92 >= rssi23)) {
+      tearMaisProximo = 92;
+      rssiMaisProximo = rssi92;
+    } else if (achou23) {
+      tearMaisProximo = 23;
+      rssiMaisProximo = rssi23;
+    }
+  }
+}
+
+void desenhaQRCode(const char* texto) {
+  // Versão 3 -> matriz 29x29
+  qrcode_initText(&qrcode, qrcodeData, 3, ECC_LOW, texto);
+
+  int size = qrcode.size;    // normalmente 29
+  int scale = 2;             // 29 * 2 = 58 pixels, cabe no 64x64
+  int offsetX = (SCREEN_WIDTH  - size * scale) / 2;
+  int offsetY = (SCREEN_HEIGHT - size * scale) / 2;
+
+  display.clearDisplay();
+
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      if (qrcode_getModule(&qrcode, x, y)) {
+        // Desenha um "quadrado" para cada módulo preto do QR
+        display.fillRect(offsetX + x * scale,
+                         offsetY + y * scale,
+                         scale,
+                         scale,
+                         WHITE);
+      }
+    }
+  }
+
+  display.display();
+}
+
+void atualizaDisplay() {
+  // Se estiver em modo QR e tiver algo capturado, mostra só o QR
+  if (modoQRCode && capturado && tearCapturado != 0) {
+    char buffer[40];
+    // Texto que vai dentro do QR (ajuste como quiser)
+    // Exemplo: "TEAR=92;RSSI=-60"
+    snprintf(buffer, sizeof(buffer), "TEAR=%d;RSSI=%d", tearCapturado, rssiCapturado);
+    desenhaQRCode(buffer);
+    return;
+  }
+
+  // Caso contrário, mostra a tela "normal"
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+
+  if (capturado && tearCapturado != 0) {
+    // Mostra TEAR capturado
+    display.print("TEAR ");
+    display.println(tearCapturado);
+
+    display.setTextSize(1);
+    display.setCursor(0, 30);
+    display.print("RSSI: ");
+    display.print(rssiCapturado);
+    display.println(" dBm");
+  } else {
+    // Modo aguardando
+    display.println("AGUARDANDO");
+    display.setTextSize(1);
+    display.setCursor(0, 30);
+
+    if (beaconVisivel && tearMaisProximo != 0) {
+      display.print("Mais prox: TEAR ");
+      display.print(tearMaisProximo);
+      display.print(" (");
+      display.print(rssiMaisProximo);
+      display.println(" dBm)");
+    } else {
+      display.println("Sem beacon");
+    }
+  }
+
+  display.display();
+}
+
+// --- Ações de clique ---
+
+void acaoCliqueSimples() {
+  // Clique curto: capturar beacon mais proximo naquele momento
+  if (beaconVisivel && tearMaisProximo != 0) {
+    capturado = true;
+    tearCapturado = tearMaisProximo;
+    rssiCapturado = rssiMaisProximo;
+    // Sai do modo QR se estiver, para voltar à tela de texto
+    modoQRCode = false;
+  } else {
+    // Sem beacon: opcionalmente limpa captura
+    capturado = false;
+    tearCapturado = 0;
+    modoQRCode = false;
+  }
+}
+
+void acaoCliqueDuplo() {
+  // Duplo clique: só mostra QR se tiver algo capturado
+  if (capturado && tearCapturado != 0) {
+    modoQRCode = true;
+  } else {
+    // Se não tiver nada capturado, ignora ou desliga modo QR
+    modoQRCode = false;
+  }
+}
+
+void acaoLongPress() {
+  // Press longo: limpar tudo
+  capturado = false;
+  tearCapturado = 0;
+  rssiCapturado = 0;
+  modoQRCode = false;
+
+  // Cancela qualquer clique pendente
+  aguardandoSegundoClique = false;
+  clickSimplesPendente    = false;
+}
+
+// --- Tratamento de bordas do botão ---
+
+void trataBotao() {
+  int estado = digitalRead(BOTAO);
+
+  // transicao solto -> pressionado
+  if (estado == LOW && botaoAnterior == HIGH) {
+    instantePressionado = millis();
+  }
+
+  // transicao pressionado -> solto
+  if (estado == HIGH && botaoAnterior == LOW) {
+    unsigned long duracao = millis() - instantePressionado;
+
+    if (duracao >= LONG_PRESS_MS) {
+      // Long press: limpar captura e sair do modo QR
+      acaoLongPress();
+    } else {
+      // Clique curto: pode ser simples ou parte de duplo clique
+      unsigned long agora = millis();
+
+      if (aguardandoSegundoClique &&
+          (agora - instanteUltimoClique) <= DOUBLE_CLICK_MS) {
+        // Detectou duplo clique
+        aguardandoSegundoClique = false;
+        clickSimplesPendente    = false;
+        acaoCliqueDuplo();
+      } else {
+        // Primeiro clique curto: começa a esperar o segundo
+        aguardandoSegundoClique = true;
+        clickSimplesPendente    = true;
+        instanteUltimoClique    = agora;
+      }
+    }
+  }
+
+  botaoAnterior = estado;
+}
+
+// ====================== SETUP ========================
+
+void setup() {
+  Serial.begin(115200);
+
+  // Botao
+  pinMode(BOTAO, INPUT_PULLUP); // botao ligado ao GND
+
+  // I2C display
+  Wire.begin(21, 22);  // SDA=21, SCL=22
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("Erro ao inicializar display!");
+    while (true);
+  }
+  display.clearDisplay();
+  display.display();
+
+  // BLE
+  BLEDevice::init("");
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(80);
+
+  Serial.println("Sistema iniciado.");
+}
+
+// ====================== LOOP =========================
+
+void loop() {
+  // 1) Escaneia beacons (92 e 23) e calcula qual está mais perto
+  scanBeacon();
+
+  // 2) Lê bordas do botão
+  trataBotao();
+
+  // 3) Se houver um clique simples pendente e o tempo do duplo clique expirou,
+  //    executa a ação de clique simples.
+  if (aguardandoSegundoClique && clickSimplesPendente) {
+    if (millis() - instanteUltimoClique > DOUBLE_CLICK_MS) {
+      aguardandoSegundoClique = false;
+      clickSimplesPendente    = false;
+      acaoCliqueSimples();
+    }
+  }
+
+  // 4) Atualiza o display com o estado atual
+  atualizaDisplay();
+
+  delay(50);  // um pouco mais rápido para resposta melhor do botão
+}
