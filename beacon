@@ -6,7 +6,9 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
-#include <qrcode.h>  // <<< NOVO: biblioteca de QR Code
+// === Forçar a usar a lib QRCode do Richard Moore no ESP32 ===
+#include <QRCode_Library.h>   // arquivo que você criou em ...\libraries\QRCode\src\
+#include <qrcode.h>           // cabeçalho da biblioteca
 
 // ====================== DISPLAY ======================
 #define SCREEN_WIDTH 128
