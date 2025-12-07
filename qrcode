@@ -6,7 +6,7 @@
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
 
-#include "qrcode.h"  // <<< usa a lib nativa do ESP32 (esp_qrcode_*)
+#include "qrcode.h"  // usa a lib nativa do ESP32 (esp_qrcode_*)
 
 // ====================== DISPLAY ======================
 #define SCREEN_WIDTH 128
@@ -15,16 +15,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 
 // ====================== BOTAO ========================
 #define BOTAO 4
-const unsigned long LONG_PRESS_MS   = 2000;  // 2 segundos (limpar)
-const unsigned long DOUBLE_CLICK_MS = 400;   // intervalo máx. para duplo clique (ms)
+const unsigned long CLEAR_PRESS_MS = 2000;   // >= 2s -> limpar
+const unsigned long QR_PRESS_MS    = 10000;  // >= 10s -> gerar QR
 
 bool botaoAnterior = HIGH;
 unsigned long instantePressionado = 0;
-
-// Controle de clique simples/duplo
-bool aguardandoSegundoClique = false;
-bool clickSimplesPendente    = false;
-unsigned long instanteUltimoClique = 0;
 
 // ====================== BEACONS ======================
 // MACs dos beacons (exatamente como o app mostra)
@@ -44,7 +39,6 @@ int  tearCapturado = 0;
 int  rssiCapturado = 0;
 
 // ====================== QR CODE ======================
-// não precisamos mais de struct QRCode nem buffer manual
 bool modoQRCode = false;   // true = mostrar QR code na tela
 
 // ====================== FUNCOES ======================
@@ -92,7 +86,7 @@ void scanBeacon() {
   }
 }
 
-// ---------- QR CODE: callback que realmente desenha no OLED ----------
+// ---------- QR CODE: callback que desenha no OLED ----------
 
 void drawQRCodeOLED(esp_qrcode_handle_t qrcode) {
   int size = esp_qrcode_get_size(qrcode);  // tamanho da matriz
@@ -133,8 +127,8 @@ void atualizaDisplay() {
   if (modoQRCode && capturado && tearCapturado != 0) {
     char buffer[40];
     // Texto que vai dentro do QR (ajuste como quiser)
-    // Exemplo: "TEAR=92;RSSI=-60"
-    snprintf(buffer, sizeof(buffer), "TEAR=%d;RSSI=%d", tearCapturado, rssiCapturado);
+    snprintf(buffer, sizeof(buffer), "TEAR=%d;RSSI=%d",
+             tearCapturado, rssiCapturado);
     desenhaQRCode(buffer);
     return;
   }
@@ -175,7 +169,7 @@ void atualizaDisplay() {
   display.display();
 }
 
-// --- Ações de clique ---
+// --- Ações ---
 
 void acaoCliqueSimples() {
   // Clique curto: capturar beacon mais proximo naquele momento
@@ -193,29 +187,25 @@ void acaoCliqueSimples() {
   }
 }
 
-void acaoCliqueDuplo() {
-  // Duplo clique: só mostra QR se tiver algo capturado
+void acaoMostrarQRCode() {
+  // Gera QR só se tiver algo capturado
   if (capturado && tearCapturado != 0) {
     modoQRCode = true;
-  } else {
-    // Se não tiver nada capturado, ignora ou desliga modo QR
-    modoQRCode = false;
   }
 }
 
 void acaoLongPress() {
-  // Press longo: limpar tudo
+  // Press longo "médio": limpar tudo
   capturado = false;
   tearCapturado = 0;
   rssiCapturado = 0;
   modoQRCode = false;
-
-  // Cancela qualquer clique pendente
-  aguardandoSegundoClique = false;
-  clickSimplesPendente    = false;
 }
 
 // --- Tratamento de bordas do botão ---
+// curto  < 2s  -> captura
+// médio  2–10s -> limpar
+// longo >=10s  -> mostrar QR
 
 void trataBotao() {
   int estado = digitalRead(BOTAO);
@@ -229,25 +219,15 @@ void trataBotao() {
   if (estado == HIGH && botaoAnterior == LOW) {
     unsigned long duracao = millis() - instantePressionado;
 
-    if (duracao >= LONG_PRESS_MS) {
-      // Long press: limpar captura e sair do modo QR
+    if (duracao >= QR_PRESS_MS) {
+      // Muito longo: gerar QR
+      acaoMostrarQRCode();
+    } else if (duracao >= CLEAR_PRESS_MS) {
+      // Long press "normal": limpar
       acaoLongPress();
     } else {
-      // Clique curto: pode ser simples ou parte de duplo clique
-      unsigned long agora = millis();
-
-      if (aguardandoSegundoClique &&
-          (agora - instanteUltimoClique) <= DOUBLE_CLICK_MS) {
-        // Detectou duplo clique
-        aguardandoSegundoClique = false;
-        clickSimplesPendente    = false;
-        acaoCliqueDuplo();
-      } else {
-        // Primeiro clique curto: começa a esperar o segundo
-        aguardandoSegundoClique = true;
-        clickSimplesPendente    = true;
-        instanteUltimoClique    = agora;
-      }
+      // Clique curto: captura
+      acaoCliqueSimples();
     }
   }
 
@@ -285,24 +265,14 @@ void setup() {
 // ====================== LOOP =========================
 
 void loop() {
-  // 1) Escaneia beacons (92 e 23) e calcula qual está mais perto
+  // Escaneia beacons (92 e 23) e calcula qual está mais perto
   scanBeacon();
 
-  // 2) Lê bordas do botão
+  // Lê o botão
   trataBotao();
 
-  // 3) Se houver um clique simples pendente e o tempo do duplo clique expirou,
-  //    executa a ação de clique simples.
-  if (aguardandoSegundoClique && clickSimplesPendente) {
-    if (millis() - instanteUltimoClique > DOUBLE_CLICK_MS) {
-      aguardandoSegundoClique = false;
-      clickSimplesPendente    = false;
-      acaoCliqueSimples();
-    }
-  }
-
-  // 4) Atualiza o display com o estado atual
+  // Atualiza o display
   atualizaDisplay();
 
-  delay(50);  // um pouco mais rápido para resposta melhor do botão
+  delay(50);
 }
