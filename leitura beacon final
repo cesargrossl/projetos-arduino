@@ -12,19 +12,18 @@
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
-
 Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ================= BOTAO ==================
-#define BOTAO 4
-const unsigned long CLEAR_PRESS_MS = 2000;   // >= 2s  -> limpar
-const unsigned long QR_PRESS_MS    = 10000;  // >= 10s -> capturar e gerar QR
+// ================= BOTOES ==================
+#define BTN_CAPTURA 4   // Botão 1: captura / limpar
+#define BTN_QR      5   // Botão 2: gerar QR
 
-bool botaoAnterior = HIGH;
-unsigned long instantePressionado = 0;
+const unsigned long LIMPA_PRESS_MS = 5000; // segurar >=5s para limpar
+
+bool btn1Anterior = HIGH;
+unsigned long btn1PressStart = 0;
 
 // ================= BEACONS =================
-// MACs dos beacons (exatamente como o app mostra)
 const char* MAC_TEAR_92 = "E0:93:8A:13:88:DA";
 const char* MAC_TEAR_23 = "ED:7D:42:03:7F:D7";
 
@@ -35,15 +34,16 @@ bool beaconVisivel    = false;
 int  tearMaisProximo  = 0;   // 0 = nenhum, 55 ou 56
 int  rssiMaisProximo  = 0;
 
-// Valores "capturados"
+// Valores capturados
 bool capturado     = false;
 int  tearCapturado = 0;
 int  rssiCapturado = 0;
 
 // ================= QR CODE =================
-bool modoQRCode = false;   // true = mostrar QR code na tela
+bool modoQRCode = false;          // true = mostrar QR na tela
+unsigned long qrMensagemAte = 0;  // para mensagem "SEM CAPTURA"
 
-// ====================== FUNCOES ======================
+// ================= FUNCOES =================
 
 void scanBeacon() {
   beaconVisivel = false;
@@ -59,13 +59,12 @@ void scanBeacon() {
 
   for (int i = 0; i < count; i++) {
     BLEAdvertisedDevice d = results.getDevice(i);
-    String mac = d.getAddress().toString();  // ex: "ed:7d:42:03:7f:d7"
+    String mac = d.getAddress().toString();
 
     if (mac.equalsIgnoreCase(MAC_TEAR_92)) {
       achou92 = true;
       rssi92 = d.getRSSI();
     }
-
     if (mac.equalsIgnoreCase(MAC_TEAR_23)) {
       achou23 = true;
       rssi23 = d.getRSSI();
@@ -74,25 +73,23 @@ void scanBeacon() {
 
   pBLEScan->clearResults();
 
-  // Decide qual eh o mais proximo (RSSI maior = mais perto)
   if (achou92 || achou23) {
     beaconVisivel = true;
 
     if (achou92 && (!achou23 || rssi92 >= rssi23)) {
       tearMaisProximo = 55;
       rssiMaisProximo = rssi92;
-    } else if (achou23) {
+    } else {
       tearMaisProximo = 56;
       rssiMaisProximo = rssi23;
     }
   }
 }
 
-// ---------- QR CODE: callback que desenha no OLED ----------
-
+// ---------- QR CODE: desenha no OLED ----------
 void drawQRCodeOLED(esp_qrcode_handle_t qrcode) {
-  int size = esp_qrcode_get_size(qrcode);  // tamanho da matriz
-  int scale = 2;                           // cada módulo vira um quadradinho 2x2
+  int size = esp_qrcode_get_size(qrcode);
+  int scale = 2; // se quiser maior: 3 (pode cortar dependendo do tamanho do QR)
 
   int offsetX = (SCREEN_WIDTH  - size * scale) / 2;
   int offsetY = (SCREEN_HEIGHT - size * scale) / 2;
@@ -104,47 +101,124 @@ void drawQRCodeOLED(esp_qrcode_handle_t qrcode) {
       if (esp_qrcode_get_module(qrcode, x, y)) {
         display.fillRect(offsetX + x * scale,
                          offsetY + y * scale,
-                         scale,
-                         scale,
+                         scale, scale,
                          SH110X_WHITE);
       }
     }
   }
-
   display.display();
 }
 
-// Gera o QR chamando a lib do ESP32
 void desenhaQRCode(const char* texto) {
   esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
-  cfg.display_func       = drawQRCodeOLED;     // nossa função acima
+  cfg.display_func       = drawQRCodeOLED;
   cfg.max_qrcode_version = 10;
-  cfg.qrcode_ecc_level   = ESP_QRCODE_ECC_LOW; // nível de correção de erro
+  cfg.qrcode_ecc_level   = ESP_QRCODE_ECC_LOW;
 
-  // Isso vai chamar drawQRCodeOLED internamente
   esp_qrcode_generate(&cfg, texto);
 }
 
+// ================= ACOES =================
+
+void acaoCapturar() {
+  if (beaconVisivel && tearMaisProximo != 0) {
+    capturado = true;
+    tearCapturado = tearMaisProximo;
+    rssiCapturado = rssiMaisProximo;
+    modoQRCode = false; // volta para tela normal
+  } else {
+    // se não tem beacon, não captura
+    capturado = false;
+    tearCapturado = 0;
+    rssiCapturado = 0;
+    modoQRCode = false;
+  }
+}
+
+void acaoLimpar() {
+  capturado = false;
+  tearCapturado = 0;
+  rssiCapturado = 0;
+  modoQRCode = false;
+}
+
+void acaoGerarQR() {
+  if (capturado && tearCapturado != 0) {
+    modoQRCode = true;
+  } else {
+    // mostra mensagem por 2s
+    modoQRCode = false;
+    qrMensagemAte = millis() + 2000;
+  }
+}
+
+// ================= LEITURA DOS BOTOES =================
+
+void trataBtnCaptura() {
+  int estado = digitalRead(BTN_CAPTURA);
+
+  // solto -> pressionado
+  if (estado == LOW && btn1Anterior == HIGH) {
+    btn1PressStart = millis();
+  }
+
+  // pressionado -> solto
+  if (estado == HIGH && btn1Anterior == LOW) {
+    unsigned long dur = millis() - btn1PressStart;
+
+    if (dur >= LIMPA_PRESS_MS) {
+      acaoLimpar();
+    } else {
+      acaoCapturar();
+    }
+  }
+
+  btn1Anterior = estado;
+}
+
+void trataBtnQR() {
+  // botão 2: clique simples
+  static bool btn2Anterior = HIGH;
+  int estado = digitalRead(BTN_QR);
+
+  if (estado == HIGH && btn2Anterior == LOW) {
+    // soltou = clique
+    acaoGerarQR();
+  }
+
+  btn2Anterior = estado;
+}
+
+// ================= DISPLAY =================
+
 void atualizaDisplay() {
-  // Se estiver em modo QR e tiver algo capturado, gera o QR
+
+  // Se estiver em modo QR e tiver captura, desenha QR
   if (modoQRCode && capturado && tearCapturado != 0) {
     char buffer[40];
-    // Texto que vai dentro do QR
     snprintf(buffer, sizeof(buffer), "TEAR=%d;RSSI=%d",
              tearCapturado, rssiCapturado);
     desenhaQRCode(buffer);
     return;
   }
 
-  // Caso contrário, mostra a tela "normal"
   display.clearDisplay();
   display.setTextColor(SH110X_WHITE);
 
-  display.setTextSize(2);
-  display.setCursor(0, 0);
+  // Mensagem temporária (ex: sem captura)
+  if (millis() < qrMensagemAte) {
+    display.setTextSize(2);
+    display.setCursor(0, 18);
+    display.println("SEM");
+    display.setCursor(0, 38);
+    display.println("CAPTURA");
+    display.display();
+    return;
+  }
 
   if (capturado && tearCapturado != 0) {
-    // Mostra TEAR capturado
+    display.setTextSize(2);
+    display.setCursor(0, 0);
     display.print("TEAR ");
     display.println(tearCapturado);
 
@@ -153,9 +227,14 @@ void atualizaDisplay() {
     display.print("RSSI: ");
     display.print(rssiCapturado);
     display.println(" dBm");
+
+    display.setCursor(0, 48);
+    display.println("BTN2: QR  | BTN1: seg 5s limpa");
   } else {
-    // Modo aguardando
+    display.setTextSize(2);
+    display.setCursor(0, 0);
     display.println("AGUARDANDO");
+
     display.setTextSize(1);
     display.setCursor(0, 30);
 
@@ -168,93 +247,31 @@ void atualizaDisplay() {
     } else {
       display.println("Sem beacon");
     }
+
+    display.setCursor(0, 50);
+    display.println("BTN1: captura | BTN2: QR");
   }
 
   display.display();
 }
 
-// --- Ações ---
-// Clique curto: captura TEAR/RSSI e mostra em texto
-void acaoCliqueSimples() {
-  if (beaconVisivel && tearMaisProximo != 0) {
-    capturado = true;
-    tearCapturado = tearMaisProximo;
-    rssiCapturado = rssiMaisProximo;
-    modoQRCode = false;   // mostra texto, não QR ainda
-  } else {
-    capturado = false;
-    tearCapturado = 0;
-    rssiCapturado = 0;
-    modoQRCode = false;
-  }
-}
-
-// Super long press: captura TEAR atual e liga modo QR
-void acaoMostrarQRCode() {
-  if (beaconVisivel && tearMaisProximo != 0) {
-    capturado = true;
-    tearCapturado = tearMaisProximo;
-    rssiCapturado = rssiMaisProximo;
-  }
-  modoQRCode = true;
-}
-
-// Long press médio: limpa captura
-void acaoLongPress() {
-  capturado = false;
-  tearCapturado = 0;
-  rssiCapturado = 0;
-  modoQRCode = false;
-}
-
-// --- Tratamento de bordas do botão ---
-// curto  < 2s   -> captura
-// médio  2–10s  -> limpar
-// longo >=10s   -> captura + QR
-void trataBotao() {
-  int estado = digitalRead(BOTAO);
-
-  // transicao solto -> pressionado
-  if (estado == LOW && botaoAnterior == HIGH) {
-    instantePressionado = millis();
-  }
-
-  // transicao pressionado -> solto
-  if (estado == HIGH && botaoAnterior == LOW) {
-    unsigned long duracao = millis() - instantePressionado;
-
-    if (duracao >= QR_PRESS_MS) {
-      acaoMostrarQRCode();
-    } else if (duracao >= CLEAR_PRESS_MS) {
-      acaoLongPress();
-    } else {
-      acaoCliqueSimples();
-    }
-  }
-
-  botaoAnterior = estado;
-}
-
-// ====================== SETUP ========================
+// ================= SETUP =================
 
 void setup() {
   Serial.begin(115200);
 
-  // Botao
-  pinMode(BOTAO, INPUT_PULLUP); // botao ligado ao GND
+  pinMode(BTN_CAPTURA, INPUT_PULLUP); // botões para GND
+  pinMode(BTN_QR, INPUT_PULLUP);
 
-  // I2C display
-  Wire.begin(21, 22);  // SDA=21, SCL=22
+  Wire.begin(21, 22);
 
-  // SH1106: begin(endereco, reset)
-  if (!display.begin(0x3C, true)) {  // se não ligar, tente 0x3D
+  if (!display.begin(0x3C, true)) {  // tente 0x3D se precisar
     Serial.println("Erro ao inicializar OLED SH1106!");
     while (true);
   }
 
-  display.setContrast(0xFF);   // melhora visibilidade
+  display.setContrast(0xFF);
   display.setRotation(0);
-
   display.clearDisplay();
   display.display();
 
@@ -268,11 +285,15 @@ void setup() {
   Serial.println("Sistema iniciado.");
 }
 
-// ====================== LOOP =========================
+// ================= LOOP =================
 
 void loop() {
   scanBeacon();
-  trataBotao();
+
+  trataBtnCaptura();
+  trataBtnQR();
+
   atualizaDisplay();
+
   delay(50);
 }
