@@ -195,11 +195,10 @@ void atualizaDisplay() {
 
   // Se estiver em modo QR e tiver captura, desenha QR
   if (modoQRCode && capturado && tearCapturado != 0) {
-    char buffer[40];
-    snprintf(buffer, sizeof(buffer), "TEAR=%d;RSSI=%d",
-             tearCapturado, rssiCapturado);
-    desenhaQRCode(buffer);
-    return;
+      char buffer[8];
+      snprintf(buffer, sizeof(buffer), "%d", tearCapturado);
+      desenhaQRCode(buffer);
+      return;
   }
 
   display.clearDisplay();
